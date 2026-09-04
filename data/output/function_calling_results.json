@@ -59,7 +59,7 @@
         "name": "fn_read_file",
         "parameters": {
             "encoding": "utf-8",
-            "path": "data[/home/user/data.json"
+            "path": "data[0]"
         }
     },
     {
@@ -67,7 +67,7 @@
         "name": "fn_read_file",
         "parameters": {
             "encoding": "latin-1",
-            "path": "C: [C:Users]"
+            "path": "C: [insert here]"
         }
     },
     {
@@ -81,7 +81,7 @@
         "prompt": "Format template: Say \"hello\" to {name}",
         "name": "fn_format_template",
         "parameters": {
-            "template": "Say  [expression]"
+            "template": "Say  [hello]"
         }
     }
 ]

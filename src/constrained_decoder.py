@@ -2,6 +2,7 @@ from llm_sdk import Small_LLM_Model
 from .schema import Schema
 from .consumer import SchemaConsumer
 
+
 class ConstrainedDecoder:
     """Generate function calls while enforcing Schema constraints."""
 
@@ -9,10 +10,10 @@ class ConstrainedDecoder:
     # while preventing unnecessarily long generation.
     # The decoder normally stops earlier as soon as the Schema reaches its finished state.
 
-    def __init__(self, functions, max_steps=150):
+    def __init__(self, functions):
         self.model = Small_LLM_Model()
         self.functions = functions
-        self.max_steps = max_steps
+        self.max_steps = 150
 
     def decode(self, prompt):
 
@@ -29,10 +30,11 @@ class ConstrainedDecoder:
             self.model,
             prompt,
         )
+
         consumer = SchemaConsumer(schema)
 
         # create an empty string called catalog tht will store the availables functions name
-        # separated by new line 
+        # separated by new line
         # - fn_add_numbers: Add two numbers
         # - fn_greet: Greet a person
         # - fn_reverse_string: Reverse a string
@@ -60,14 +62,9 @@ class ConstrainedDecoder:
         # The model_prompt only gives the model context and instructions.
 
         model_prompt = (
-            "Choose the best function and extract its parameters from the user's request.\n\n"
             f"Available functions:\n{catalog}\n\n"
             f"User request: {prompt}\n\n"
-            "Generate the function call JSON. "
-            "When a parameter value is a pattern or expression (such as a regex), "
-            "produce the shortest possible form that satisfies the request. "
-            "Do not include example matches, repeated occurrences, or extra text "
-            "copied from elsewhere in the request."
+            "Generate the function call JSON."
         )
 
         # "encode() tokenizes the model prompt into token IDs.
@@ -75,7 +72,7 @@ class ConstrainedDecoder:
         # tolist() converts the tensor into a list 
         # so we can append generated token IDs to it during decoding."
 
-        input_ids = (
+        context_ids = (
             self.model.encode(model_prompt)
             .squeeze(0)
             .tolist()
@@ -115,7 +112,7 @@ class ConstrainedDecoder:
                 # the (expensive) forward pass entirely.
                 token_id = allowed_ids[0]
             else:
-                logits = self.model.get_logits_from_input_ids(input_ids)
+                logits = self.model.get_logits_from_input_ids(context_ids)
                 token_id = schema.select_token(logits, allowed_ids)
             # We add the chosen token ID to our generated result.
             result.append(token_id)
@@ -134,7 +131,7 @@ class ConstrainedDecoder:
 
             # Contains the entire context given to the LLM, including the newly generated token.
             # Then the LLM uses that updated context to calculate the next logits.
-            input_ids.append(token_id)
+            context_ids.append(token_id)
 
 
             # input_ids

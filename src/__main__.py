@@ -91,13 +91,16 @@ def main():
     args = parser.parse_args()
     # here we pass the prompts to the validator and store them in requets after validation 
     # and returns a valid list of dictionaries contains prompt as a key and prompts itself as a value.
-    requests = prompt_validator(args.input)
+    try:
+        requests = prompt_validator(args.input)
 
-    # here we pass the functions to functions validator and store them in raw functions variable
-    # and returns valid functions definition as a list of dictionaries.
-    raw_functions = functions_validator(
-        args.functions_definition
-    )
+        raw_functions = functions_validator(
+            args.functions_definition
+        )
+
+    except (FileNotFoundError, ValueError, TypeError) as e:
+        print(f"Error: {e}")
+        return
 
     # make a empty dictionary called functions
     functions = {}
@@ -164,4 +167,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+
+    try:
+        main()
+
+    # KeyboardInterrupt and Exception are both directly under BaseException:
+    except KeyboardInterrupt:
+        print("User stopped")
+    except Exception as e:
+        print(f"Error: {e}")

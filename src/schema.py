@@ -5,7 +5,7 @@ import re
 # Characters that legitimately extend a just-closed bracket/paren construct
 # (e.g. the "+" in "[0-9]+"). Used to avoid cutting a regex atom off right
 # before its quantifier.
-QUANTIFIER_LEAD_CHARS = frozenset("*+?{")
+# QUANTIFIER_LEAD_CHARS = frozenset("*+?{")
 
 
 class SchemaState:
@@ -104,15 +104,28 @@ class Schema:
         self.synthesis_quote_confidence_threshold = 0.02  # tune this too
 
     def select_token(self, logits, allowed_ids):
-        if not (
+
+        is_string_value = (
             self.state == SchemaState.EXPECT_PARAMETER_VALUE
             and self.value_type == "string"
             and self.value_started
-        ):
+        )
+
+        if not is_string_value:
             return max(allowed_ids, key=lambda t: logits[t])
+        # **************************************************************
+        # That special block is used when all three are true:
+
+        # We are currently generating a parameter value
+        # The parameter's type is string
+        # We have already started generating the string
 
         quote_id = self.encode('"')[0]
-        content_ids = [t for t in allowed_ids if t != quote_id]
+        content_ids = []
+
+        for token_id in allowed_ids:
+            if token_id != quote_id:
+                content_ids.append(token_id)
 
         # If the quote is the only legal token (e.g. we've hit the
         # max_string_tokens safety cap), there's nothing to filter or
@@ -120,214 +133,176 @@ class Schema:
         if not content_ids:
             return quote_id
 
-        is_verbatim = self._is_verbatim_so_far()
+        # "Should this string continue, or have we already found the value we need?"
+        appeared_in_prompt = self._value_appeared_in_prompt()
+        # this check exists because strings can be normal text OR patterns like regexes.
         has_open_construct = "[" in self.value_buffer or "(" in self.value_buffer
 
-        # Hard rule, not a probability nudge: once we've left verbatim
-        # territory (the value no longer matches a substring of the
-        # prompt) without ever opening a bracket construct, there is
-        # nothing legitimate left to add. Close now - regardless of how
-        # confident the model is about continuing. A soft threshold can
-        # always be overridden by a model that's simply very sure about
-        # an unwanted continuation; this can't be.
         if (
-            not is_verbatim
+            not appeared_in_prompt
             and not has_open_construct
+            # We've already generated at least one token for this string. We don't want to close an empty string immediately.
             and self.value_token_count > 0
+            # The Schema currently allows us to generate the closing ".So we actually have the option to finish the string.
             and quote_id in allowed_ids
         ):
+            # Choose " as the next token.
             return quote_id
 
-        # Second hard rule: the buffer exactly completes one of the
-        # prompt's own quoted spans (e.g. buffer == "cat" and the prompt
-        # contains 'cat'). That's a strong, structural signal that this
-        # value is done, even though a *longer* substring of the prompt
-        # (e.g. "cat sat on the mat...") might also still match - only a
-        # complete quoted span gets this treatment, so it can't fire on
-        # an arbitrary partial match.
         if (
+            # We have generated something — it's not empty.
             self.value_buffer
+            # quoted_spans contains pieces of text that were inside quotes in the user's prompt.
             and self.value_buffer in self.quoted_spans
             and not has_open_construct
             and quote_id in allowed_ids
         ):
             return quote_id
 
+        # This will contain tokens that we decide are safe to use.
         safe_content_ids = []
-        blocked_by_verbatim_guard = []
+        # It stores tokens that were rejected by this particular rule:
+        blocked_prompt_tokens = []
 
+        # "Look at every possible content token and reject the ones that could create a bad string."
         for token_id in content_ids:
             text = self.model.decode([token_id])
-            if not text:
+            # if not text:
+            #     continue
+            if text.lstrip().startswith("\\"):
                 continue
-
+            # "What would my string become if I choose this token?"
             prospective = self.value_buffer + text
 
             if (
-                self.value_buffer
-                and self.value_buffer.isalnum()
+                # # we already have content
+                # self.value_buffer
+                # # The content consists of letters/numbers.
+                self.value_buffer.isalnum()
+                # Does the new token start with one of these regex symbols?
                 and text[0] in ".*+?\\"
             ):
                 continue
 
-            # Don't let a synthesized value (one not copied verbatim from
-            # the prompt) open with a capturing group. "(" as the very
-            # first character only ever serves to wrap the whole value in
-            # a redundant group (e.g. "([0-9]+)" instead of "[0-9]+") -
-            # there's nothing before it that a group could usefully
-            # separate. A verbatim copy is left alone in case the quoted
-            # source text itself happens to start with "(".
             if (
+                # We haven't generated anything for this string yet.
                 self.value_token_count == 0
+                # lstrip() removes spaces from the beginning.
+                # Does this token start with (?
                 and text.lstrip().startswith("(")
+                # Would this new value appear in the user's prompt?
                 and prospective not in self.prompt
             ):
                 continue
 
-            # While the value is still an exact copy of prompt text,
-            # don't let a candidate abandon that match unless it's
-            # extending the copy further or opening a bracket construct.
-            # Anything else (an anchor, a stray symbol, an unrelated
-            # word) is unwanted elaboration once a literal match is
-            # already sitting there complete - e.g. this is what stops
-            # "cat" from growing into "cat$|dog$|cat".
             if (
                 self.value_buffer
-                and is_verbatim
+                and appeared_in_prompt
+                # If we add the new token, the resulting value would no longer appear in the prompt.
                 and prospective not in self.prompt
-                and not has_open_construct
+                # and not has_open_construct
                 and not text.lstrip().startswith("[")
             ):
-                blocked_by_verbatim_guard.append(token_id)
+                blocked_prompt_tokens.append(token_id)
                 continue
 
-            if prospective not in self.prompt and self._would_repeat_adjacent(prospective):
-                continue
-
+            # “This token passed all our safety checks, so add it to the list of tokens we're allowed to choose from.”
             safe_content_ids.append(token_id)
 
+        # empty list
         if not safe_content_ids:
+            # It checks three things:
+
+            # blocked_prompt_tokens
+            # → We had tokens that were rejected by the prompt-matching rule.
+            # quote_id in allowed_ids
+            # → We are legally allowed to close the string with ".
+            # self.value_token_count > 0
+            # → The string already contains at least one token, so we don't close an empty string.
             if (
-                blocked_by_verbatim_guard
+                blocked_prompt_tokens
                 and quote_id in allowed_ids
                 and self.value_token_count > 0
             ):
-                # Every remaining candidate would abandon a complete
-                # literal match for no good reason - stop instead of
-                # picking one anyway.
+                # We couldn't find a safe content token, so close the string instead
                 return quote_id
-            # Otherwise this is just the existing filters being too
-            # aggressive for this step - fall back rather than raising.
+
+            # fallback "Okay, our safety filters rejected everything. Don't get stuck—use the original allowed content tokens."
             safe_content_ids = content_ids
 
+        # "Among the tokens we're allowing, which one has the highest LLM score?"
         best_content = max(safe_content_ids, key=lambda t: logits[t])
 
         if quote_id in allowed_ids and self.value_token_count > 0:
-            structurally_complete = self._value_is_structurally_complete()
+            balanced = self._has_balanced_brackets()
 
-            # Once a bracket/paren construct has balanced, the decision
-            # is made structurally, not probabilistically - either the
-            # model is reaching for a quantifier (take it, unconditionally)
-            # or it isn't (close, unconditionally). Leaving this to the
-            # probability check would let an extreme swing in confidence
-            # either strand a needed quantifier or keep a finished
-            # construct open for no reason.
-            if structurally_complete:
-                if self._wants_quantifier_extension(best_content):
+            if balanced:
+                if self._should_extend_regex(best_content):
                     return best_content
                 return quote_id
 
-            max_score = max(logits[t] for t in allowed_ids)
-            exps = {t: math.exp(logits[t] - max_score) for t in allowed_ids}
-            total = sum(exps.values())
-            quote_prob = exps[quote_id] / total
+            quote_score = logits[quote_id]
+            best_other_score = float("-inf")
 
-            threshold = (
-                self.quote_confidence_threshold
-                if is_verbatim
-                else self.synthesis_quote_confidence_threshold
-            )
+            for token_id in allowed_ids:
+                if token_id == quote_id:
+                    continue
 
-            if quote_prob >= threshold:
+                score = logits[token_id]
+
+                if score > best_other_score:
+                    best_other_score = score
+
+            if quote_score >= best_other_score:
                 return quote_id
 
         return best_content
 
-    def _would_repeat_adjacent(self, candidate_buffer, max_k=6):
-        """Flags back-to-back repetition only — e.g. '*' immediately
-        followed by another '*', or 'cat' immediately followed by
-        'cat' again. Unlike a global substring search, this ignores
-        characters that simply recur later in ordinary text (like the
-        two 'm's in "Programming"), so it won't misfire on real words."""
-        n = len(candidate_buffer)
-        for k in range(1, min(max_k, n // 2) + 1):
-            tail = candidate_buffer[-k:]
-            prev = candidate_buffer[-2 * k:-k]
-            if tail and tail == prev:
-                return True
-        return False
-
-    def _value_is_structurally_complete(self):
-        """Generic bracket-balance check: only relevant once the value has
-        opened at least one '(' or '[' construct. It doesn't know anything
-        about regex semantics or content — it only tracks paired-symbol
-        balance, same as validating any bracketed expression."""
+    def _has_balanced_brackets(self):
         buf = self.value_buffer
+
         if "[" not in buf and "(" not in buf:
-            return False  # never engages for plain literal strings
+            return False
 
         depth = 0
+
         for ch in buf:
             if ch in "([":
                 depth += 1
             elif ch in ")]":
                 depth -= 1
-
+        # Check whether something is still open
         if depth != 0:
             return False
 
-        return buf[-1] != "\\"
+        return True
 
-    def _is_verbatim_so_far(self):
-        """True while the value being generated is still an exact
-        substring of the user's prompt - i.e. the model is copying text
-        out of the request (typical for source_string). False the moment
-        the buffer diverges from the prompt, meaning the model has
-        started inventing content instead (typical for a synthesized
-        regex or a symbolic replacement like '*'). This only ever
-        compares against self.prompt - it never checks for specific
-        words, so it generalizes to any request."""
-        if not self.value_buffer:
-            return True
+    def _value_appeared_in_prompt(self):
         return self.value_buffer in self.prompt
 
     @staticmethod
     def _extract_quoted_spans(prompt):
-        """Pull out every substring the prompt itself wrapped in quotes
-        (single or double). Purely structural - it doesn't know or care
-        what any given span says, only that the prompt marked it off as
-        a distinct unit."""
         spans = set()
-        for quote_char in ("'", '"'):
-            pattern = re.escape(quote_char) + r"([^" + re.escape(quote_char) + r"]*)" + re.escape(quote_char)
-            for match in re.finditer(pattern, prompt):
-                span = match.group(1)
-                if span:
-                    spans.add(span)
+
+        start = prompt.find('"')
+        end = prompt.find('"', start + 1)
+
+        if start != -1 and end != -1:
+            spans.add(prompt[start + 1:end])
+
+        start = prompt.find("'")
+        end = prompt.find("'", start + 1)
+
+        if start != -1 and end != -1:
+            spans.add(prompt[start + 1:end])
+
         return spans
 
-    def _wants_quantifier_extension(self, candidate_id):
-        """True only if we've just closed a bracket/paren construct and
-        the model's best next candidate is a regex quantifier (*, +, ?,
-        or the start of a {n,m} form). This is what lets '[0-9]+' keep
-        its '+' instead of being force-closed the instant ']' lands,
-        while still closing '[aeiouAEIOU]' immediately since a plain
-        letter is never a quantifier."""
-        if not self.value_buffer or self.value_buffer[-1] not in ")]":
-            return False
-
+    def _should_extend_regex(self, candidate_id):
         text = self.model.decode([candidate_id])
-        return bool(text) and text[0] in QUANTIFIER_LEAD_CHARS
+        quantifiers = ["*", "+", "?", "{"]
+
+        return text in quantifiers
 
     def encode(self, text):
         return self.model.encode(text).squeeze(0).tolist()
