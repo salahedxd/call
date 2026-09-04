@@ -101,40 +101,22 @@ class ConstrainedDecoder:
 
             # We don't calculate the logits ourselves. The LLM calculates them. and returns a list of float logits
 
-            logits = self.model.get_logits_from_input_ids(input_ids)
-
-            # The LLM might give scores to thousands of tokens.
-            # But we don't want to allow all of them.
-            # The Schema knows what is valid at the current position.
-            # For example, if we're at the beginning of JSON, it might only allow:
-            # {
-            # If we're expecting a function name, it might allow tokens that can form:
-
-            # fn_greet
-            # fn_add_numbers
-            # fn_reverse_string
-
-            # We're asking the Schema:
-            # "Given everything we've generated so far, which token IDs are allowed to come next?"
-
             allowed_ids = schema.allowed_tokens()
 
-
-            # Make sure there is at least one valid token
             if not allowed_ids:
                 raise ValueError(
                     f"No valid tokens available in schema state "
                     f"{schema.state}"
                 )
 
-            # Choose the highest-scoring token among the tokens allowed by the Schema.
-            
-            # — the len() check and the max() are most relevant when there
-            # can be multiple tokens, such as function names, parameter names, and values.
-
-
-            token_id = schema.select_token(logits, allowed_ids)
-
+            if len(allowed_ids) == 1:
+                # Only one legal token — the schema has already fully determined
+                # the answer, so there's nothing for the model to decide. Skip
+                # the (expensive) forward pass entirely.
+                token_id = allowed_ids[0]
+            else:
+                logits = self.model.get_logits_from_input_ids(input_ids)
+                token_id = schema.select_token(logits, allowed_ids)
             # We add the chosen token ID to our generated result.
             result.append(token_id)
 
