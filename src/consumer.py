@@ -33,18 +33,22 @@ class SchemaConsumer:
             self.advance_state()
 
     def consume_function_token(self, token_id):
+        # . Its main job is to use the generated token to eliminate
+        # function candidates that no longer match.
         schema = self.schema
         valid_sequences = []
-
+        # we loop over the twin name and sequence of the
+        # active function sequences
         for name, sequence in schema.active_sequences:
+            # the condition is basically a guard to ensure we don't go out of bounds when checking the sequence
             if schema.sequence_index < len(sequence):
                 if sequence[schema.sequence_index] == token_id:
                     valid_sequences.append((name, sequence))
 
         schema.active_sequences = valid_sequences
 
-        if not schema.active_sequences:
-            raise ValueError("Invalid function name token")
+        # if not schema.active_sequences:
+        #     raise ValueError("Invalid function name token")
 
         schema.sequence_index += 1
 
@@ -55,6 +59,9 @@ class SchemaConsumer:
                 completed.append((name, sequence))
 
         if completed:
+            # here we take the first completed function name
+            # and set it as the selected function [0]
+            # its the binary name sequensce while [0][0] means the name of the function
             schema.selected_function = completed[0][0]
             schema.function_sequences = []
             schema.active_sequences = []
@@ -66,31 +73,38 @@ class SchemaConsumer:
         valid_sequences = []
 
         for name, sequence in schema.active_parameter_sequences:
+            # a guard to not depass te length of the sequence when checking the current token
             if schema.parameter_sequence_index < len(sequence):
+                # filter the active parameter sequences to only keep those that match the current token
                 if sequence[schema.parameter_sequence_index] == token_id:
                     valid_sequences.append((name, sequence))
-
+        # update the active parameter sequences to only include those that matched the current token
         schema.active_parameter_sequences = valid_sequences
-
-        if not schema.active_parameter_sequences:
-            raise ValueError("Invalid parameter name token")
-
+        # advance the parameter sequence index to move to the next token in the sequence
         schema.parameter_sequence_index += 1
 
         completed = []
-
+        # check if any of the active parameter sequences have been fully
+        # matched and select the first completed parameter name as the current parameter
         for name, sequence in schema.active_parameter_sequences:
             if schema.parameter_sequence_index == len(sequence):
                 completed.append((name, sequence))
 
         if completed:
+            # here we take the first completed parameter name
+            # and set it as the current parameter
             schema.current_parameter = completed[0][0]
+            # we add the current parameter to the set of used parameters to avoid reusing it
             schema.used_parameters.add(schema.current_parameter)
-
+            # # we advance the parameter index to move to the next parameter in the function's parameter list
+            # schema.parameter_index += 1
+            # we reset the active parameter sequences and active parameter sequence index to prepare for the next parameter
+            # and the parameter sequence index
             schema.parameter_sequences = []
             schema.active_parameter_sequences = []
             schema.parameter_sequence_index = 0
 
+            # we advance the state to expect the parameter colon next
             self.advance_state()
 
     def consume_parameter_end(self, token_id):
@@ -98,25 +112,22 @@ class SchemaConsumer:
 
         comma_id = schema.encode(",")[0]
         close_id = schema.encode("}")[0]
+        # reset the value-related attributes to prepare for the next parameter
+        # or to finalize the function call
+        schema.value_type = None
+        schema.value_buffer = ""
+        schema.value_token_count = 0
 
+        # we check if the token is a comma or a closing brace to determine
+        # the next state
         if token_id == comma_id:
+            schema.parameter_index += 1
             schema.state = SchemaState.EXPECT_PARAMETER_NAME
-            schema.expected_ids = []
-            schema.expected_index = 0
-            schema.parameter_sequences = []
-            schema.active_parameter_sequences = []
-            schema.parameter_sequence_index = 0
             return
 
         if token_id == close_id:
             schema.state = SchemaState.EXPECT_OBJECT_END
-            schema.expected_ids = []
-            schema.expected_index = 0
             return
-
-        raise ValueError(
-            f"Expected parameter separator or object end, got {token_id}"
-        )
 
     def consume_value_token(self, token_id):
         schema = self.schema
@@ -176,38 +187,18 @@ class SchemaConsumer:
             comma_id = schema.encode(",")[0]
             close_id = schema.encode("}")[0]
 
-            if token_id == comma_id:
+            if token_id == comma_id or token_id == close_id:
                 if not schema.value_buffer:
                     raise ValueError("Number cannot be empty")
 
-                schema.value_type = None
-                schema.state = SchemaState.EXPECT_PARAMETER_OR_END
-                schema.expected_ids = []
-                schema.expected_index = 0
                 self.consume_parameter_end(token_id)
                 return
 
-            if token_id == close_id:
-                if not schema.value_buffer:
-                    raise ValueError("Number cannot be empty")
+            # value_buffer
+            # → WHAT have we generated?
 
-                schema.value_type = None
-                schema.value_buffer = ""
-                schema.value_token_count = 0
-                schema.state = SchemaState.EXPECT_OBJECT_END
-                schema.expected_ids = []
-                schema.expected_index = 0
-                return
-
-            if not token_text:
-                raise ValueError("Invalid number token")
-
-            if not all(
-                char in "0123456789.-+eE"
-                for char in token_text
-            ):
-                raise ValueError("Invalid number token")
-
+            # value_token_count
+            # → HOW MANY tokens have we generated?
             schema.value_buffer += token_text
             schema.value_token_count += 1
 

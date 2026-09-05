@@ -76,6 +76,7 @@ class Schema:
         self.parameter_sequences = []
         self.active_parameter_sequences = []
         self.parameter_sequence_index = 0
+        self.parameter_index = 0
         self.used_parameters = set()
 
         self.value_type = None
@@ -111,9 +112,13 @@ class Schema:
         )
 
         if not is_string_value:
+            # we suppose the first token in the allowed_ids is the best one,
+            # and we get its score from the logits
             best_token_id = allowed_ids[0]
             best_score = logits[best_token_id]
 
+            # we loop over the allowed_ids and find
+            # the one with the highest score
             for token_id in allowed_ids:
                 score = logits[token_id]
 
@@ -329,6 +334,8 @@ class Schema:
             return self.allowed_parameter_tokens()
 
         if self.state == SchemaState.EXPECT_PARAMETER_VALUE:
+            if self.value_type is None:
+                self.load_parameter_value()
             return self.allowed_value_tokens()
 
         if self.state == SchemaState.EXPECT_PARAMETER_OR_END:
@@ -450,11 +457,13 @@ class Schema:
         #     "b": ...
         # }
 
-        # We go through each parameter name.
+        # We go through each parameter name from
+        # the selected function and encode it into token IDs.
 
         for name in function.parameters:
             if name not in self.used_parameters:
                 tokens = self.encode(f'"{name}"')
+                #     ("a", [2, 5, 7]),("b", [8, 3]) ...
                 self.parameter_sequences.append((name, tokens))
 
         self.active_parameter_sequences = self.parameter_sequences.copy()
@@ -463,11 +472,21 @@ class Schema:
     def allowed_parameter_tokens(self):
         allowed = []
 
+        # Check every parameter that is still a possible candidate
+        # It guards against going past the end of the token sequence.
         for name, sequence in self.active_parameter_sequences:
+
+            # Make sure this parameter still has a token
+            # at the current position
             if self.parameter_sequence_index < len(sequence):
+
+                # Get the token at the current position
                 token_id = sequence[self.parameter_sequence_index]
+
+                # Add it to the list of allowed tokens
                 allowed.append(token_id)
 
+        # Return all possible tokens for the current position
         return allowed
 
     def load_parameter_value(self):
@@ -475,42 +494,61 @@ class Schema:
         parameter = function.parameters[self.current_parameter]
 
         self.value_type = parameter.type
+        # This is where we store the value while we're generating it.
         self.value_buffer = ""
+        # This counts how many value tokens we've generated.
         self.value_token_count = 0
+        # This indicates whether we have started generating the value.
+        # This is mainly important for strings.
         self.value_started = False
 
     def allowed_value_tokens(self):
 
-        if self.value_type is None:
-            self.load_parameter_value()
-
+        # If the parameter type is boolean the only valid values are
+        # true and false So we encode both "true" "false" and combine them
+        # Then select_token() uses the model's logits to choose between them.
         if self.value_type == "boolean":
             return self.encode("true") + self.encode("false")
 
+        # If the type is null, there's only one possible value:
         if self.value_type == "null":
             return self.encode("null")
 
+        # Both are handled together because both represent numeric values.
+        # But there's an important difference later:
+        # number  → can contain decimals
+        # integer → cannot contain decimals
         if self.value_type in ("number", "integer"):
             prompt_tokens = self.get_prompt_number_tokens()
 
-            if prompt_tokens:
-                if self.value_token_count < len(prompt_tokens):
-                    return [prompt_tokens[self.value_token_count]]
+            # if prompt_tokens:
+            if not prompt_tokens:
+                raise ValueError("No number found in prompt")
+                # Suppose: "265" → [100, 200] At first value_token_count = 0
+                # So 0 < 2 → True and we return [100] After consuming it
+                # value_token_count = 1
+            if self.value_token_count < len(prompt_tokens):
+                return [prompt_tokens[self.value_token_count]]
 
-                return self.allowed_parameter_end_tokens()
+            return self.allowed_parameter_end_tokens()
 
-            return self.get_number_tokens(self.value_type)
+            # return self.get_number_tokens(self.value_type)
 
         if self.value_type == "string":
+            # "  → normal quote → used to START/END the JSON string
+            # \" → escaped quote → allowed INSIDE the string
+
             quote_id = self.encode('"')[0]
             escaped_quote_id = self.encode('\\"')[0]
 
+            # The only legal token right now is ".
             if not self.value_started:
                 return [quote_id]
-
+            # If we've reached the maximum allowed number
+            # of string-content tokens, we force the closing quote.
             if self.value_token_count == self.max_string_tokens:
                 return [quote_id]
-
+            # Which tokens are allowed to be inside this string?
             content_tokens = self.get_string_content_tokens()
 
             if self.value_token_count == 0:
@@ -527,60 +565,36 @@ class Schema:
         )
 
     def get_prompt_number_tokens(self):
-        """get_prompt_number_tokens() finds the numbers inside 
+        """get_prompt_number_tokens() finds the numbers inside
         the user's prompt and converts them into token IDs."""
         numbers = []
 
+        # We split the prompt into words, strip punctuation, and try to convert each word to a float.# 
         for word in self.prompt.split():
+            # strip() removes leading and trailing whitespace, and then we remove
+            # common punctuation characters from the beginning and end of the word.
+            # This is to isolate the numeric part of the word for conversion.
             word = word.strip(".,!?")
-            
+
             try:
                 float(word)
                 numbers.append(word)
             except ValueError:
                 continue
 
-        if not numbers:
-            return []
-
         function = self.functions[self.selected_function]
-        parameter_names = list(function.parameters)
+        parameter_count = len(function.parameters)
 
-        parameter_index = parameter_names.index(self.current_parameter)
+        if len(numbers) != parameter_count:
+            raise ValueError(
+                "Number of numbers in prompt does not match parameter count"
+            )
 
-        return self.encode(numbers[parameter_index])
-
-    def get_number_tokens(self, value_type):
-        allowed = []
-
-        for token_id in range(self.model._tokenizer.vocab_size):
-            token_text = self.model.decode([token_id])
-
-            if not token_text:
-                continue
-
-            candidate = self.value_buffer + token_text
-
-            if candidate == "-":
-                allowed.append(token_id)
-                continue
-
-            digits = candidate[1:] if candidate.startswith("-") else candidate
-
-            if digits.isdigit():
-                allowed.append(token_id)
-                continue
-
-            if value_type == "number":
-                if (
-                    digits.count(".") == 1
-                    and digits.replace(".", "").isdigit()
-                ):
-                    allowed.append(token_id)
-
-        return allowed
+        return self.encode(numbers[self.parameter_index])
 
     def allowed_parameter_end_tokens(self):
+        # ,  → there are more parameters
+        # }  → all parameters are finished
         comma_id = self.encode(",")[0]
         close_id = self.encode("}")[0]
 
@@ -620,29 +634,16 @@ class Schema:
 
             token_text = self.model.decode([token_id])
 
-            if not token_text:
-                continue
+            # if not token_text:
+            #     continue
 
-            if '"' in token_text and '\\"' not in token_text:
-                continue
+            if '"' in token_text:
+                if '\\"' not in token_text:
+                    continue
 
-            # A raw backslash is only valid JSON if the very next
-            # character is a recognized escape (\\, \", \/, \b, \f, \n,
-            # \r, \t, or \u....). We generate one token at a time and
-            # can't guarantee that pairing, so any token containing a
-            # backslash that isn't one of those exact known-safe
-            # sequences is excluded outright. In practice this just
-            # nudges regex synthesis toward bracket notation ("[0-9]")
-            # instead of backslash shorthand ("\d"), which keeps every
-            # generated string valid JSON without needing a repair pass.
             if "\\" in token_text and token_text not in (
                 "\\\\", "\\\"", "\\/", "\\b", "\\f", "\\n", "\\r", "\\t",
             ):
-                continue
-
-            # Raw control characters (unescaped newlines, tabs, etc.)
-            # are never valid inside a JSON string literal.
-            if any(ord(ch) < 0x20 for ch in token_text):
                 continue
 
             allowed.append(token_id)

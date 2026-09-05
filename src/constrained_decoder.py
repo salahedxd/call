@@ -46,7 +46,6 @@ class ConstrainedDecoder:
         for name, function in self.functions.items():
             catalog += f"- {name}: {function.description}\n"
 
-
         # This is simply building the text that we will send to the LLM.
         # Choose the best function for the user's request.
 
@@ -112,6 +111,8 @@ class ConstrainedDecoder:
                 # parameter names, numbers, booleans, etc. depending on the current Schema state.
                 token_id = allowed_ids[0]
             else:
+                # get logits always return logits for all the vocablury
+                # and iput its just a helper to define the context
                 logits = self.model.get_logits_from_input_ids(context_ids)
                 token_id = schema.select_token(logits, allowed_ids)
             # We add the chosen token ID to our generated result.
