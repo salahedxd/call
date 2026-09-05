@@ -1,6 +1,5 @@
 import json
-import math
-import re
+
 
 # Characters that legitimately extend a just-closed bracket/paren construct
 # (e.g. the "+" in "[0-9]+"). Used to avoid cutting a regex atom off right
@@ -112,7 +111,17 @@ class Schema:
         )
 
         if not is_string_value:
-            return max(allowed_ids, key=lambda t: logits[t])
+            best_token_id = allowed_ids[0]
+            best_score = logits[best_token_id]
+
+            for token_id in allowed_ids:
+                score = logits[token_id]
+
+                if score > best_score:
+                    best_token_id = token_id
+                    best_score = score
+
+            return best_token_id
         # **************************************************************
         # That special block is used when all three are true:
 
@@ -345,7 +354,8 @@ class Schema:
         # “Because the prompt will be part of the generated JSON object,
         # so it must follow JSON string formatting,
         # including quotation marks and escaping special characters.”
-    
+        # like "replace 'cat' with 'dog'" → "\"replace 'cat' with 'dog'\""
+
         elif self.state == SchemaState.EXPECT_PROMPT_VALUE:
             expected = json.dumps(self.prompt)
         elif self.state == SchemaState.EXPECT_PROMPT_COMMA:

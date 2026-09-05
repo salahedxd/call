@@ -107,9 +107,9 @@ class ConstrainedDecoder:
                 )
 
             if len(allowed_ids) == 1:
-                # Only one legal token — the schema has already fully determined
-                # the answer, so there's nothing for the model to decide. Skip
-                # the (expensive) forward pass entirely.
+                # For the normal token case, we're mostly dealing with the 
+                # fixed/structural parts of the JSON, such as: { : , } " But also things like function names,
+                # parameter names, numbers, booleans, etc. depending on the current Schema state.
                 token_id = allowed_ids[0]
             else:
                 logits = self.model.get_logits_from_input_ids(context_ids)
@@ -117,39 +117,12 @@ class ConstrainedDecoder:
             # We add the chosen token ID to our generated result.
             result.append(token_id)
 
-            # Now the Schema needs to update its state based on that token.
-            # For example:
-            # Schema expects:
-            # {
-            # ↓
-            # token generated = "{"
-            # ↓
-            # Schema moves to:
-            # EXPECT_FUNCTION_FIELD
+            # consume the token_id to update the schema state
             consumer.consume(token_id)
-
 
             # Contains the entire context given to the LLM, including the newly generated token.
             # Then the LLM uses that updated context to calculate the next logits.
             context_ids.append(token_id)
-
-
-            # input_ids
-            #     ↓
-            # LLM
-            #     ↓
-            # logits
-            #     ↓
-            # Schema restrictions
-            #     ↓
-            # choose token
-            #     ↓
-            # append token
-            #     ↓
-            # input_ids
-            #     ↓
-            # repeat
-
 
         # If we're here and Schema still isn't finished, it means:
         # We reached max_steps without producing a complete function call.
@@ -161,48 +134,3 @@ class ConstrainedDecoder:
 
         # We now convert those IDs back into text:
         return self.model.decode(result)
-
-
-    #              MODEL PROMPT
-    #                   ↓
-    #               encode()
-    #                   ↓
-    #               input_ids
-    #                   │
-    #                   ▼
-    #           ┌───────────────┐
-    #           │      LLM      │
-    #           │               │
-    #           │  calculates   │
-    #           │    logits     │
-    #           └───────┬───────┘
-    #                   ↓
-    #          logits for ALL tokens
-    #                   │
-    #                   │
-    #           ┌───────▼───────┐
-    #           │    SCHEMA     │
-    #           │               │
-    #           │ Which tokens  │
-    #           │ are allowed?  │
-    #           └───────┬───────┘
-    #                   ↓
-    #             allowed_ids
-    #                   │
-    #                   ↓
-    #        highest-scoring ALLOWED
-    #               token
-    #                   │
-    #          ┌────────┴────────┐
-    #          ↓                 ↓
-    #    result.append()    schema.consume()
-    #          │                 │
-    #          │                 ↓
-    #          │            update state
-    #          │
-    #          └──────→ input_ids.append()
-    #                           │
-    #                           ↓
-    #                      generate next
-    #                           │
-    #                           └──────→ repeat
