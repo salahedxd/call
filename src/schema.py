@@ -1,3 +1,4 @@
+from ast import If
 import json
 
 
@@ -83,7 +84,8 @@ class Schema:
         self.value_buffer = ""
         self.value_started = False
         self.value_token_count = 0
-
+        # value_buffer = "hello"
+        # value_token_count = 1
         self.finished = False
 
         self.max_string_tokens = 20
@@ -93,7 +95,7 @@ class Schema:
         # of the prompt (e.g. source_string copying text verbatim). The
         # model tends to be genuinely confident about closing in that
         # case, so we can afford to trust it.
-        self.quote_confidence_threshold = 0.15  # tune this against real runs
+        # tune this against real runs
 
         # Used once the value has diverged from the prompt text - i.e. the
         # model is synthesizing content (a regex, a symbolic replacement)
@@ -101,7 +103,7 @@ class Schema:
         # about closing after a single invented symbol, so for invented
         # content we accept much weaker confidence as "good enough to
         # close" instead of letting it run on.
-        self.synthesis_quote_confidence_threshold = 0.02  # tune this too
+        # tune this too
 
     def select_token(self, logits, allowed_ids):
 
@@ -144,8 +146,6 @@ class Schema:
         # If the quote is the only legal token (e.g. we've hit the
         # max_string_tokens safety cap), there's nothing to filter or
         # compare — just close the string.
-        if not content_ids:
-            return quote_id
 
         # "Should this string continue, or have we already found the value we need?"
         appeared_in_prompt = self._value_appeared_in_prompt()
@@ -158,7 +158,7 @@ class Schema:
             # We've already generated at least one token for this string. We don't want to close an empty string immediately.
             and self.value_token_count > 0
             # The Schema currently allows us to generate the closing ".So we actually have the option to finish the string.
-            and quote_id in allowed_ids
+            # and quote_id in allowed_ids
         ):
             # Choose " as the next token.
             return quote_id
@@ -169,7 +169,6 @@ class Schema:
             # quoted_spans contains pieces of text that were inside quotes in the user's prompt.
             and self.value_buffer in self.quoted_spans
             and not has_open_construct
-            and quote_id in allowed_ids
         ):
             return quote_id
 
@@ -183,11 +182,12 @@ class Schema:
             text = self.model.decode([token_id])
             # if not text:
             #     continue
+            # remove space from teh beginning nd Reject tokens beginning with a backslash
             if text.lstrip().startswith("\\"):
                 continue
             # "What would my string become if I choose this token?"
             prospective = self.value_buffer + text
-
+            # If we've already built normal letters/numbers, don't suddenly add a regex operator.
             if (
                 # # we already have content
                 # self.value_buffer
@@ -198,6 +198,8 @@ class Schema:
             ):
                 continue
 
+            # If the string is just starting, and the model wants to start with (, but that resulting text doesn't exist in the user's request, reject it.
+            # This helps prevent the model from inventing a parenthesized expression that wasn't actually requested.
             if (
                 # We haven't generated anything for this string yet.
                 self.value_token_count == 0
@@ -235,7 +237,6 @@ class Schema:
             # → The string already contains at least one token, so we don't close an empty string.
             if (
                 blocked_prompt_tokens
-                and quote_id in allowed_ids
                 and self.value_token_count > 0
             ):
                 # We couldn't find a safe content token, so close the string instead
@@ -243,6 +244,24 @@ class Schema:
 
             # fallback "Okay, our safety filters rejected everything. Don't get stuck—use the original allowed content tokens."
             safe_content_ids = content_ids
+
+            # content_ids
+            #     │
+            #     ▼
+            # Check token 1
+            #     │
+            #     ├── starts with "\" ? ────────► REJECT
+            #     │
+            #     ├── regex symbol after normal text? ─► REJECT
+            #     │
+            #     ├── starts with "(" incorrectly? ───► REJECT
+            #     │
+            #     ├── breaks prompt extraction? ──────► blocked_prompt_tokens
+            #     │
+            #     └── passed everything
+            #                 │
+            #                 ▼
+            #         safe_content_ids
 
         # "Among the tokens we're allowing, which one has the highest LLM score?"
         best_content = max(safe_content_ids, key=lambda t: logits[t])
@@ -259,8 +278,8 @@ class Schema:
             best_other_score = float("-inf")
 
             for token_id in allowed_ids:
-                if token_id == quote_id:
-                    continue
+                # if token_id == quote_id:
+                #     continue
 
                 score = logits[token_id]
 
@@ -278,15 +297,15 @@ class Schema:
         if "[" not in buf and "(" not in buf:
             return False
 
-        depth = 0
+        count = 0
 
-        for ch in buf:
-            if ch in "([":
-                depth += 1
-            elif ch in ")]":
-                depth -= 1
-        # Check whether something is still open
-        if depth != 0:
+        for char in buf:
+            if char in "([":
+                count += 1
+            elif char in ")]":
+                count -= 1
+
+        if count != 0:
             return False
 
         return True
@@ -539,7 +558,6 @@ class Schema:
             # \" → escaped quote → allowed INSIDE the string
 
             quote_id = self.encode('"')[0]
-            escaped_quote_id = self.encode('\\"')[0]
 
             # The only legal token right now is ".
             if not self.value_started:
@@ -556,9 +574,9 @@ class Schema:
                 # allowed to close — an immediately-empty string is never
                 # the intended answer for a value the model was asked to
                 # produce.
-                return content_tokens + [escaped_quote_id]
+                return content_tokens
 
-            return content_tokens + [escaped_quote_id, quote_id]
+            return content_tokens + [quote_id]
 
         raise ValueError(
             f"Unsupported parameter type: {self.value_type}"

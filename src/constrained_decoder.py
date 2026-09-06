@@ -67,8 +67,8 @@ class ConstrainedDecoder:
         )
 
         # "encode() tokenizes the model prompt into token IDs.
-        # squeeze() removes the unnecessary batch dimension, and 
-        # tolist() converts the tensor into a list 
+        # squeeze() removes the unnecessary batch dimension, and
+        # tolist() converts the tensor into a list
         # so we can append generated token IDs to it during decoding."
 
         context_ids = (
