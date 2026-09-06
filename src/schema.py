@@ -634,9 +634,6 @@ class Schema:
 
             token_text = self.model.decode([token_id])
 
-            # if not token_text:
-            #     continue
-
             if '"' in token_text:
                 if '\\"' not in token_text:
                     continue
