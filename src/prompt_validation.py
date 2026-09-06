@@ -1,8 +1,17 @@
 from json import JSONDecodeError, load
 from pathlib import Path
+from typing import List
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 
-def prompt_validator(file_path: str):
+class PromptItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt: str
+
+
+def prompt_validator(file_path: str) -> List[dict]:
     path = Path(file_path)
 
     if not path.exists():
@@ -26,18 +35,13 @@ def prompt_validator(file_path: str):
     if not data:
         raise ValueError("JSON file cannot be empty")
 
+    items = []
+
     for item in data:
-        if not isinstance(item, dict):
-            raise ValueError("Each item must be a dictionary")
+        try:
+            prompt = PromptItem.model_validate(item)
+            items.append(prompt)
+        except ValidationError as e:
+            raise ValueError(f"invalid prompt format: {e}")
 
-        if len(item) != 1 or "prompt" not in item:
-            raise ValueError(
-                "Each object must contain exactly one prompt key"
-            )
-
-        if not isinstance(item["prompt"], str):
-            raise ValueError(
-                "The prompt must be a string"
-            )
-
-    return data
+    return [item.model_dump() for item in items]

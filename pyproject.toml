@@ -1,9 +1,13 @@
 [project]
-name = "call-me-maybe"
+name = "callmemaybe"
 version = "0.1.0"
-requires-python = ">=3.10"
+description = "call me maybe"
+readme = "README.md"
+requires-python = ">=3.13"
 
 dependencies = [
+    "numpy>=2.4.4",
+    "pydantic>=2.13.1",
     "llm-sdk",
 ]
 

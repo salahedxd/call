@@ -1,12 +1,32 @@
 from json import JSONDecodeError, load
 from pathlib import Path
+from typing import Dict, List, Literal
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 
-VALID_KEYS = {"name", "description", "parameters", "returns"}
-VALID_TYPES = {"number", "integer", "string", "boolean", "null"}
+class ParameterDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["number", "integer", "string", "boolean", "null"]
 
 
-def functions_validator(file_path: str):
+class ReturnDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["number", "integer", "string", "boolean", "null"]
+
+
+class FunctionDefinition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    description: str
+    parameters: Dict[str, ParameterDefinition]
+    returns: ReturnDefinition
+
+
+def functions_validator(file_path: str) -> List[dict]:
     path = Path(file_path)
 
     if not path.exists():
@@ -20,61 +40,28 @@ def functions_validator(file_path: str):
 
     try:
         with path.open("r", encoding="utf-8") as file:
-            functions = load(file)
+            raw_functions = load(file)
     except JSONDecodeError:
         raise ValueError("invalid JSON file")
 
-    if not isinstance(functions, list):
+    if not isinstance(raw_functions, list):
         raise TypeError("the root type must be a list")
 
-    if not functions:
+    if not raw_functions:
         raise ValueError("the functions can't be empty")
 
-    for function in functions:
-        if not isinstance(function, dict):
-            raise TypeError("the function must be a dictionary")
+    functions = []
 
-        if set(function) != VALID_KEYS:
-            raise ValueError("invalid function format")
+    for item in raw_functions:
+        try:
+            function = FunctionDefinition.model_validate(item)
+            functions.append(function)
+        except ValidationError as e:
+            raise ValueError(f"invalid function format: {e}")
 
-        if not isinstance(function["name"], str):
-            raise ValueError("the name must be a string")
+    result = [function.model_dump() for function in functions]
 
-        if not isinstance(function["description"], str):
-            raise ValueError("the description must be a string")
-
-        parameters = function["parameters"]
-
-        if not isinstance(parameters, dict):
-            raise TypeError("the parameters must be a dictionary")
-
-        for name, parameter in parameters.items():
-            if not isinstance(name, str) or not name:
-                raise ValueError(
-                    "the parameter name must be a non-empty string"
-                )
-
-            if not isinstance(parameter, dict):
-                raise TypeError("the parameter must be a dictionary")
-
-            if "type" not in parameter:
-                raise ValueError("parameter missing type")
-
-            if parameter["type"] not in VALID_TYPES:
-                raise ValueError("invalid parameter type")
-
-        returns = function["returns"]
-
-        if not isinstance(returns, dict):
-            raise TypeError("the return must be a dictionary")
-
-        if "type" not in returns:
-            raise ValueError("return missing type")
-
-        if returns["type"] not in VALID_TYPES:
-            raise ValueError("invalid return type")
-
-    functions.append({
+    result.append({
         "name": "fn_not_found",
         "description": (
             "Choose this function when the user's prompt "
@@ -90,4 +77,4 @@ def functions_validator(file_path: str):
         }
     })
 
-    return functions
+    return result

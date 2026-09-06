@@ -13,10 +13,8 @@ from .constrained_decoder import ConstrainedDecoder
 
 def adapter(function):
     parameters = {}
-
     for name, data in function["parameters"].items():
         parameters[name] = SimpleNamespace(type=data["type"])
-
     return SimpleNamespace(
         name=function["name"],
         description=function["description"],
