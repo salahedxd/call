@@ -6,18 +6,24 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 
 class ParameterDefinition(BaseModel):
+    """Model for parameter definitions in function validation."""
+
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["number", "integer", "string", "boolean", "null"]
 
 
 class ReturnDefinition(BaseModel):
+    """Model for return definitions in function validation."""
+
     model_config = ConfigDict(extra="forbid")
 
     type: Literal["number", "integer", "string", "boolean", "null"]
 
 
 class FunctionDefinition(BaseModel):
+    """Model for function definitions in function validation."""
+
     model_config = ConfigDict(extra="forbid")
 
     name: str
@@ -27,6 +33,9 @@ class FunctionDefinition(BaseModel):
 
 
 def functions_validator(file_path: str) -> List[dict]:
+    """Validate the functions definition JSON file
+    and return a list of function dictionaries."""
+
     path = Path(file_path)
 
     if not path.exists():

@@ -1,17 +1,22 @@
 from json import JSONDecodeError, load
 from pathlib import Path
+from typing import Any
 
 
 class Vocabulary:
     """Provide access to the model's token vocabulary."""
 
-    def __init__(self, model):
+    def __init__(self, model: Any) -> None:
+        """Initialize the vocabulary and load the model's token mappings."""
+
         self.model = model
         self.load_vocabulary()
 
-    def load_vocabulary(self):
-        self.id_to_token = {}
-        self.token_to_id = {}
+    def load_vocabulary(self) -> None:
+        """Load the token-to-ID mappings from the vocabulary JSON file."""
+
+        self.id_to_token: dict[int, str] = {}
+        self.token_to_id: dict[str, int] = {}
 
         vocab_path = self.model.get_path_to_vocab_file()
         path = Path(vocab_path)
@@ -47,7 +52,11 @@ class Vocabulary:
             self.id_to_token[token_id] = token
 
     def get_id_from_token(self, token: str) -> int:
+        """Return the token ID associated with a token."""
+
         return self.token_to_id[token]
 
     def get_token_from_id(self, token_id: int) -> str:
-        return self.id_to_token.get(token_id)
+        """Return the token associated with a token ID."""
+
+        return self.id_to_token[token_id]

@@ -1,11 +1,5 @@
-from ast import If
 import json
-
-
-# Characters that legitimately extend a just-closed bracket/paren construct
-# (e.g. the "+" in "[0-9]+"). Used to avoid cutting a regex atom off right
-# before its quantifier.
-# QUANTIFIER_LEAD_CHARS = frozenset("*+?{")
+from llm_sdk import Small_LLM_Model  # type: ignore[attr-defined]
 
 
 class SchemaState:
@@ -37,75 +31,55 @@ class SchemaState:
 class Schema:
     """Manage the structure and token constraints of a function call."""
 
-    # Schema is the rule engine that knows what the next
-    # valid token is at every point of the function-call JSON.
+    def __init__(
+        self,
+        functions: dict,
+        model: Small_LLM_Model,
+        prompt: str,
+    ) -> None:
+        """Initialize the schema with the available functions, model
+        and prompt. and other attributes to track the state
+        of the schema and the generated output."""
 
-    # allowed_ids = self.schema.allowed_tokens()
-    # "Which tokens am I allowed to generate right now?"
-    # Then:
-    # self.schema.consume(token_id)
-    # "I generated this token. Update your state."
+        self.functions: dict = functions
+        self.model: Small_LLM_Model = model
+        self.prompt: str = prompt
 
-    def __init__(self, functions, model, prompt):
-        self.functions = functions
-        self.model = model
-        self.prompt = prompt
+        self.quoted_spans: set[str] = self._extract_quoted_spans(prompt)
 
-        # Substrings the prompt itself sets off in quotes, e.g. for
-        # "...the word 'cat' with 'dog' in 'The cat sat...'" this is
-        # {"cat", "dog", "The cat sat..."}. A synthesized value that
-        # exactly completes one of these spans has very likely finished
-        # its job, even if a *longer* literal match against the prompt
-        # would also be technically possible (e.g. "cat" vs "cat sat on
-        # the mat..." are both substrings of the prompt, but only "cat"
-        # is a complete quoted span). This never looks at what the spans
-        # actually say - just where the prompt itself drew boundaries.
-        self.quoted_spans = self._extract_quoted_spans(prompt)
+        self.state: int = SchemaState.START
+        self.selected_function: str | None = None
+        self.current_parameter: str | None = None
 
-        self.state = SchemaState.START
-        self.selected_function = None
-        self.current_parameter = None
+        self.expected_ids: list[int] = []
+        self.expected_index: int = 0
 
-        # expected ids its the storage for encode return .. tht contains all the ids of a sequence
-        self.expected_ids = []
-        self.expected_index = 0
+        self.function_sequences: list[tuple[str, list[int]]] = []
+        self.active_sequences: list[tuple[str, list[int]]] = []
+        self.sequence_index: int = 0
 
-        self.function_sequences = []
-        self.active_sequences = []
-        self.sequence_index = 0
+        self.parameter_sequences: list[tuple[str, list[int]]] = []
+        self.active_parameter_sequences: list[tuple[str, list[int]]] = []
+        self.parameter_sequence_index: int = 0
+        self.parameter_index: int = 0
+        self.used_parameters: set[str] = set()
 
-        self.parameter_sequences = []
-        self.active_parameter_sequences = []
-        self.parameter_sequence_index = 0
-        self.parameter_index = 0
-        self.used_parameters = set()
+        self.value_type: str | None = None
+        self.value_buffer: str = ""
+        self.value_started: bool = False
+        self.value_token_count: int = 0
+        self.finished: bool = False
 
-        self.value_type = None
-        self.value_buffer = ""
-        self.value_started = False
-        self.value_token_count = 0
-        # value_buffer = "hello"
-        # value_token_count = 1
-        self.finished = False
+        self.max_string_tokens: int = 20
+        self.safe_string_tokens: list[int] | None = None
 
-        self.max_string_tokens = 20
-        self.safe_string_tokens = None
-
-        # Used while the value being generated is still an exact substring
-        # of the prompt (e.g. source_string copying text verbatim). The
-        # model tends to be genuinely confident about closing in that
-        # case, so we can afford to trust it.
-        # tune this against real runs
-
-        # Used once the value has diverged from the prompt text - i.e. the
-        # model is synthesizing content (a regex, a symbolic replacement)
-        # rather than copying it. A small model is rarely >15% confident
-        # about closing after a single invented symbol, so for invented
-        # content we accept much weaker confidence as "good enough to
-        # close" instead of letting it run on.
-        # tune this too
-
-    def select_token(self, logits, allowed_ids):
+    def select_token(
+        self,
+        logits: list[float],
+        allowed_ids: list[int],
+    ) -> int:
+        """Select the best token from the allowed tokens
+        based on the current schema state and logits."""
 
         is_string_value = (
             self.state == SchemaState.EXPECT_PARAMETER_VALUE
@@ -114,13 +88,10 @@ class Schema:
         )
 
         if not is_string_value:
-            # we suppose the first token in the allowed_ids is the best one,
-            # and we get its score from the logits
+
             best_token_id = allowed_ids[0]
             best_score = logits[best_token_id]
 
-            # we loop over the allowed_ids and find
-            # the one with the highest score
             for token_id in allowed_ids:
                 score = logits[token_id]
 
@@ -129,12 +100,6 @@ class Schema:
                     best_score = score
 
             return best_token_id
-        # **************************************************************
-        # That special block is used when all three are true:
-
-        # We are currently generating a parameter value
-        # The parameter's type is string
-        # We have already started generating the string
 
         quote_id = self.encode('"')[0]
         content_ids = []
@@ -143,70 +108,46 @@ class Schema:
             if token_id != quote_id:
                 content_ids.append(token_id)
 
-        # If the quote is the only legal token (e.g. we've hit the
-        # max_string_tokens safety cap), there's nothing to filter or
-        # compare — just close the string.
-
-        # "Should this string continue, or have we already found the value we need?"
         appeared_in_prompt = self._value_appeared_in_prompt()
-        # this check exists because strings can be normal text OR patterns like regexes.
-        has_open_construct = "[" in self.value_buffer or "(" in self.value_buffer
+        has_open_construct = (
+            "[" in self.value_buffer
+            or "(" in self.value_buffer
+        )
 
         if (
             not appeared_in_prompt
             and not has_open_construct
-            # We've already generated at least one token for this string. We don't want to close an empty string immediately.
             and self.value_token_count > 0
-            # The Schema currently allows us to generate the closing ".So we actually have the option to finish the string.
-            # and quote_id in allowed_ids
         ):
-            # Choose " as the next token.
             return quote_id
 
         if (
-            # We have generated something — it's not empty.
             self.value_buffer
-            # quoted_spans contains pieces of text that were inside quotes in the user's prompt.
             and self.value_buffer in self.quoted_spans
             and not has_open_construct
         ):
             return quote_id
 
-        # This will contain tokens that we decide are safe to use.
         safe_content_ids = []
-        # It stores tokens that were rejected by this particular rule:
         blocked_prompt_tokens = []
 
-        # "Look at every possible content token and reject the ones that could create a bad string."
         for token_id in content_ids:
             text = self.model.decode([token_id])
-            # if not text:
-            #     continue
-            # remove space from teh beginning nd Reject tokens beginning with a backslash
+
             if text.lstrip().startswith("\\"):
                 continue
-            # "What would my string become if I choose this token?"
+
             prospective = self.value_buffer + text
-            # If we've already built normal letters/numbers, don't suddenly add a regex operator.
+
             if (
-                # # we already have content
-                # self.value_buffer
-                # # The content consists of letters/numbers.
                 self.value_buffer.isalnum()
-                # Does the new token start with one of these regex symbols?
                 and text[0] in ".*+?\\"
             ):
                 continue
 
-            # If the string is just starting, and the model wants to start with (, but that resulting text doesn't exist in the user's request, reject it.
-            # This helps prevent the model from inventing a parenthesized expression that wasn't actually requested.
             if (
-                # We haven't generated anything for this string yet.
                 self.value_token_count == 0
-                # lstrip() removes spaces from the beginning.
-                # Does this token start with (?
                 and text.lstrip().startswith("(")
-                # Would this new value appear in the user's prompt?
                 and prospective not in self.prompt
             ):
                 continue
@@ -214,56 +155,24 @@ class Schema:
             if (
                 self.value_buffer
                 and appeared_in_prompt
-                # If we add the new token, the resulting value would no longer appear in the prompt.
                 and prospective not in self.prompt
-                # and not has_open_construct
                 and not text.lstrip().startswith("[")
             ):
                 blocked_prompt_tokens.append(token_id)
                 continue
 
-            # “This token passed all our safety checks, so add it to the list of tokens we're allowed to choose from.”
             safe_content_ids.append(token_id)
 
-        # empty list
         if not safe_content_ids:
-            # It checks three things:
 
-            # blocked_prompt_tokens
-            # → We had tokens that were rejected by the prompt-matching rule.
-            # quote_id in allowed_ids
-            # → We are legally allowed to close the string with ".
-            # self.value_token_count > 0
-            # → The string already contains at least one token, so we don't close an empty string.
             if (
                 blocked_prompt_tokens
                 and self.value_token_count > 0
             ):
-                # We couldn't find a safe content token, so close the string instead
                 return quote_id
 
-            # fallback "Okay, our safety filters rejected everything. Don't get stuck—use the original allowed content tokens."
             safe_content_ids = content_ids
 
-            # content_ids
-            #     │
-            #     ▼
-            # Check token 1
-            #     │
-            #     ├── starts with "\" ? ────────► REJECT
-            #     │
-            #     ├── regex symbol after normal text? ─► REJECT
-            #     │
-            #     ├── starts with "(" incorrectly? ───► REJECT
-            #     │
-            #     ├── breaks prompt extraction? ──────► blocked_prompt_tokens
-            #     │
-            #     └── passed everything
-            #                 │
-            #                 ▼
-            #         safe_content_ids
-
-        # "Among the tokens we're allowing, which one has the highest LLM score?"
         best_content = max(safe_content_ids, key=lambda t: logits[t])
 
         if quote_id in allowed_ids and self.value_token_count > 0:
@@ -278,8 +187,6 @@ class Schema:
             best_other_score = float("-inf")
 
             for token_id in allowed_ids:
-                # if token_id == quote_id:
-                #     continue
 
                 score = logits[token_id]
 
@@ -291,7 +198,9 @@ class Schema:
 
         return best_content
 
-    def _has_balanced_brackets(self):
+    def _has_balanced_brackets(self) -> bool:
+        """check if the value buffer has balanced brackets and parentheses."""
+
         buf = self.value_buffer
 
         if "[" not in buf and "(" not in buf:
@@ -310,11 +219,16 @@ class Schema:
 
         return True
 
-    def _value_appeared_in_prompt(self):
+    def _value_appeared_in_prompt(self) -> bool:
+        """check if the value buffer appears in the prompt."""
+
         return self.value_buffer in self.prompt
 
     @staticmethod
-    def _extract_quoted_spans(prompt):
+    def _extract_quoted_spans(prompt: str) -> set[str]:
+        """Extract quoted spans from the prompt
+        to help with string value validation."""
+
         spans = set()
 
         start = prompt.find('"')
@@ -331,16 +245,20 @@ class Schema:
 
         return spans
 
-    def _should_extend_regex(self, candidate_id):
+    def _should_extend_regex(self, candidate_id: int) -> bool:
+        """Check if the candidate token should extend a regex pattern."""
+
         text = self.model.decode([candidate_id])
         quantifiers = ["*", "+", "?", "{"]
 
         return text in quantifiers
 
-    def encode(self, text):
-        return self.model.encode(text).squeeze(0).tolist()
+    def encode(self, text: str) -> list[int]:
+        """Encode text into token IDs using the model's tokenizer."""
+        return list(self.model.encode(text).squeeze(0).tolist())
 
-    def allowed_tokens(self):
+    def allowed_tokens(self) -> list[int]:
+        """Determine the allowed tokens based on the current schema state."""
 
         if self.state == SchemaState.EXPECT_FUNCTION_NAME:
             if not self.active_sequences:
@@ -365,7 +283,9 @@ class Schema:
 
         return [self.expected_ids[self.expected_index]]
 
-    def load_expected(self):
+    def load_expected(self) -> None:
+        """Load the expected token IDs based on the current schema state."""
+
         expected = None
 
         if self.state == SchemaState.START:
@@ -374,14 +294,6 @@ class Schema:
             expected = '"prompt"'
         elif self.state == SchemaState.EXPECT_PROMPT_COLON:
             expected = ":"
-
-        # We use json.dumps() to convert the user's prompt into a 
-        # JSON-formatted string before encoding it into tokens.”
-        # “Because the prompt will be part of the generated JSON object,
-        # so it must follow JSON string formatting,
-        # including quotation marks and escaping special characters.”
-        # like "replace 'cat' with 'dog'" → "\"replace 'cat' with 'dog'\""
-
         elif self.state == SchemaState.EXPECT_PROMPT_VALUE:
             expected = json.dumps(self.prompt)
         elif self.state == SchemaState.EXPECT_PROMPT_COMMA:
@@ -403,177 +315,114 @@ class Schema:
         elif self.state == SchemaState.EXPECT_OBJECT_END:
             expected = "}"
 
-            # should raise if no one treated
-
         if expected is not None:
             self.expected_ids = self.encode(expected)
-            # encode() returns a list of token IDs. 0 means the first one
             self.expected_index = 0
 
-    def load_function_sequences(self):
-
-        # A list containing tuples,
-        # where each tuple contains a string and a list of token IDs.
+    def load_function_sequences(self) -> None:
+        """Load the token sequences for all available function names."""
 
         self.function_sequences = []
 
-        # Encode every function name
         for name in self.functions:
             tokens = self.encode(f'"{name}"')
             self.function_sequences.append((name, tokens))
 
-            # [
-            #     ("fn_add_numbers", [10, 20, 30]),
-            #     ("fn_greet", [10, 20, 40]),
-            # ]
-
-        # Copy them into active sequences
         self.active_sequences = self.function_sequences.copy()
         self.sequence_index = 0
 
-    def allowed_function_tokens(self):
+    def allowed_function_tokens(self) -> list[int]:
+        """Determine the allowed tokens for function names
+        based on the current schema state."""
+
         allowed = []
 
         for name, sequence in self.active_sequences:
             if self.sequence_index < len(sequence):
-                # storing the matched token id for each function name
                 token_id = sequence[self.sequence_index]
-
-                # fn_add_numbers → [10, 20, 30]
-                #                 ↑
-                #                 10
-
-                # fn_greet       → [10, 20, 40]
-                #                 ↑
-                #                 10
-
-                # fn_reverse     → [10, 20, 50]
-                #                 ↑
-                #                 10
 
                 allowed.append(token_id)
 
         return allowed
 
-    def load_parameter_sequences(self):
+    def load_parameter_sequences(self) -> None:
+        """Load the token sequences
+        for all parameters of the selected function."""
+
         if self.selected_function is None:
             raise ValueError("No function selected")
-
-        # we store the function object in the local variable function
-            # name="fn_add_numbers",
-            # description="Add two numbers",
-            # parameters={
-            #     "a": ...,
-            #     "b": ...
-            # }
 
         function = self.functions[self.selected_function]
 
         self.parameter_sequences = []
 
-        # {
-        #     "a": ...,
-        #     "b": ...
-        # }
-
-        # We go through each parameter name from
-        # the selected function and encode it into token IDs.
-
         for name in function.parameters:
             if name not in self.used_parameters:
                 tokens = self.encode(f'"{name}"')
-                #     ("a", [2, 5, 7]),("b", [8, 3]) ...
                 self.parameter_sequences.append((name, tokens))
 
         self.active_parameter_sequences = self.parameter_sequences.copy()
         self.parameter_sequence_index = 0
 
-    def allowed_parameter_tokens(self):
+    def allowed_parameter_tokens(self) -> list[int]:
+        """determine the allowed tokens for parameter names
+        based on the current schema state."""
+
         allowed = []
 
-        # Check every parameter that is still a possible candidate
-        # It guards against going past the end of the token sequence.
         for name, sequence in self.active_parameter_sequences:
-
-            # Make sure this parameter still has a token
-            # at the current position
             if self.parameter_sequence_index < len(sequence):
 
-                # Get the token at the current position
                 token_id = sequence[self.parameter_sequence_index]
 
-                # Add it to the list of allowed tokens
                 allowed.append(token_id)
 
-        # Return all possible tokens for the current position
         return allowed
 
-    def load_parameter_value(self):
+    def load_parameter_value(self) -> None:
+        """Load the expected value type for the current parameter
+        based on the selected function's definition."""
+
         function = self.functions[self.selected_function]
         parameter = function.parameters[self.current_parameter]
 
         self.value_type = parameter.type
-        # This is where we store the value while we're generating it.
         self.value_buffer = ""
-        # This counts how many value tokens we've generated.
         self.value_token_count = 0
-        # This indicates whether we have started generating the value.
-        # This is mainly important for strings.
         self.value_started = False
 
-    def allowed_value_tokens(self):
+    def allowed_value_tokens(self) -> list[int]:
+        """Determine the allowed tokens for parameter values"""
 
-        # If the parameter type is boolean the only valid values are
-        # true and false So we encode both "true" "false" and combine them
-        # Then select_token() uses the model's logits to choose between them.
         if self.value_type == "boolean":
             return self.encode("true") + self.encode("false")
 
-        # If the type is null, there's only one possible value:
         if self.value_type == "null":
             return self.encode("null")
 
-        # Both are handled together because both represent numeric values.
-        # But there's an important difference later:
-        # number  → can contain decimals
-        # integer → cannot contain decimals
         if self.value_type in ("number", "integer"):
             prompt_tokens = self.get_prompt_number_tokens()
 
-            # if prompt_tokens:
             if not prompt_tokens:
                 raise ValueError("No number found in prompt")
-                # Suppose: "265" → [100, 200] At first value_token_count = 0
-                # So 0 < 2 → True and we return [100] After consuming it
-                # value_token_count = 1
+
             if self.value_token_count < len(prompt_tokens):
                 return [prompt_tokens[self.value_token_count]]
 
             return self.allowed_parameter_end_tokens()
 
-            # return self.get_number_tokens(self.value_type)
-
         if self.value_type == "string":
-            # "  → normal quote → used to START/END the JSON string
-            # \" → escaped quote → allowed INSIDE the string
-
             quote_id = self.encode('"')[0]
 
-            # The only legal token right now is ".
             if not self.value_started:
                 return [quote_id]
-            # If we've reached the maximum allowed number
-            # of string-content tokens, we force the closing quote.
+
             if self.value_token_count == self.max_string_tokens:
                 return [quote_id]
-            # Which tokens are allowed to be inside this string?
+
             content_tokens = self.get_string_content_tokens()
 
             if self.value_token_count == 0:
-                # A value must contain at least one character before it's
-                # allowed to close — an immediately-empty string is never
-                # the intended answer for a value the model was asked to
-                # produce.
                 return content_tokens
 
             return content_tokens + [quote_id]
@@ -582,16 +431,13 @@ class Schema:
             f"Unsupported parameter type: {self.value_type}"
         )
 
-    def get_prompt_number_tokens(self):
-        """get_prompt_number_tokens() finds the numbers inside
-        the user's prompt and converts them into token IDs."""
+    def get_prompt_number_tokens(self) -> list[int]:
+        """Find the numbers in the prompt
+        and encode the number for the current parameter."""
+
         numbers = []
 
-        # We split the prompt into words, strip punctuation, and try to convert each word to a float.# 
         for word in self.prompt.split():
-            # strip() removes leading and trailing whitespace, and then we remove
-            # common punctuation characters from the beginning and end of the word.
-            # This is to isolate the numeric part of the word for conversion.
             word = word.strip(".,!?")
 
             try:
@@ -610,9 +456,9 @@ class Schema:
 
         return self.encode(numbers[self.parameter_index])
 
-    def allowed_parameter_end_tokens(self):
-        # ,  → there are more parameters
-        # }  → all parameters are finished
+    def allowed_parameter_end_tokens(self) -> list[int]:
+        """Return the tokens allowed after a parameter value."""
+
         comma_id = self.encode(",")[0]
         close_id = self.encode("}")[0]
 
@@ -632,16 +478,12 @@ class Schema:
 
         return allowed
 
-    def get_string_content_tokens(self):
+    def get_string_content_tokens(self) -> list[int]:
+        """Build and cache the token IDs
+        that are safe for JSON string content."""
 
-        # make a safe string tokens if not exist
         if self.safe_string_tokens is not None:
             return self.safe_string_tokens
-
-        # The whitelist is basically:
-        # “These are the tokens the LLM is allowed to use while we're inside a string.”
-        # And we exclude tokens containing an unescaped 
-        # ", because a raw " would be interpreted as the end of the JSON string.
 
         quote_id = self.encode('"')[0]
         allowed = []

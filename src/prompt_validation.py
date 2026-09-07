@@ -6,12 +6,17 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 
 class PromptItem(BaseModel):
+    """Model for prompt items in prompt validation."""
+
     model_config = ConfigDict(extra="forbid")
 
     prompt: str
 
 
 def prompt_validator(file_path: str) -> List[dict]:
+    """Validate the prompt JSON file
+    and return a list of prompt dictionaries."""
+
     path = Path(file_path)
 
     if not path.exists():
